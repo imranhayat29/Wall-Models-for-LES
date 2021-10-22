@@ -18,8 +18,9 @@ clc
 % For GLL, n>=(N+3)/2 for exact integral of polynomial order N
 n=[30]; 
 
-% Choose Re_tau at which DNS mean profile data will be imported 
-% (source: https://turbulence.oden.utexas.edu/)
+% Choose Re_tau at which Channel DNS mean profile data will be imported
+% See folder: Channel_DNS_data
+% (source of data: https://turbulence.oden.utexas.edu/)
 Re = [550 950 2000 4200 5200];  
 
 %% Secondary inputs
@@ -56,7 +57,7 @@ elseif Re(r)==5200
 end
 
 % read in DNS y+ vs u+ data to obtain u_hwm at y_hwm
-filename = sprintf('./DNS_data/Austin_Retau%i.dat',Re(r));
+filename = sprintf('./Channel_DNS_data/Austin_Retau%i.dat',Re(r));
 data  = load(filename);
 y     = data(:, 1);
 yplus = data(:, 2);
@@ -64,9 +65,10 @@ uplus = data(:, 3);
 
 % Read in corresponding flow variables to dimensionalize the data
 % ("Austin_DNS_param.xlsx" contains kinematic viscosity and utau
-% information at different Re_tau obtained from UT-Austin DNS database.)
+%  information for Channel DNS at different Re_tau obtained from 
+%  UT-Austin DNS database.)
 
-param = xlsread('./DNS_data/Austin_DNS_param.xlsx');
+param = xlsread('./Channel_DNS_data/Austin_DNS_param.xlsx');
 utau_nominal = param(index,3);         
 Retau        = param(index,1);
 
