@@ -188,8 +188,14 @@ legend(legendCell)
 ylim([0 5])
 
 
+%************************ END OF GQWM CODE *******************************%
 
-%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%% Subroutines %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+
+
+
+%*************************************************************************%
+%                           Subroutines                                   %
+%*************************************************************************%
 
 % Newton-Raphson Method:
 function ut = newton_raphson(u,f,tol_NR,eps_eqm)
@@ -212,7 +218,6 @@ end
 
 
 % Secant method for quadrature formula 
-
 function [utnew,iter_completed,T] = quad_secant(x,w,u_hwm,f,ut1,ut2,tol,iter)
 
 tic
@@ -232,9 +237,7 @@ for i = 1:iter
     for j=1:length(x)
         Inew = Inew + f(x(j),utnew) * w(j);
     end
-    
-%      fprintf('iter:%2d, utau=%17.15f, u_hwm=%17.15f\n',i,utnew,Inew);
-    
+
     if ( abs(Inew-u_hwm) <= tol )
         break;
     end
