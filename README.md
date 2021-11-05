@@ -9,4 +9,6 @@ For ODE equilibrium WM, the spectral implementation should be a preferred choice
 
 Channel flow DNS data from Johns Hopkins Turbulence Database (JHTDB) and UT-Austin database are included for offline a priori validation of these wall models.
 
-NOTE: ArXiv link to the paper describing these wall models will be posted below soon. Please check back later.
+For details, please check the following ArXiv link to the paper describing these wall models:
+
+https://arxiv.org/abs/2111.02542
