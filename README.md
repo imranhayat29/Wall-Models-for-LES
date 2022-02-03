@@ -1,9 +1,9 @@
 # Wall-Models-for-LES
 This repository contains MATLAB implementations of the following wall models (WM) for incompressible LES solvers. 
 
-1. ODE equilibrium WM (traditional finite volume implementation)
-2. ODE equilibrium WM (new spectral implementation)
-3. Integral WM
+1. ODE equilibrium WM (traditional finite volume implementation) - FV_ODE_EQWM.m
+2. ODE equilibrium WM (new spectral implementation) - Gauss_Quadrature_ODE_EQWM.m
+3. Integral WM - Integral_WM.m
 
 For ODE equilibrium WM, the spectral implementation should be a preferred choice. Compared to the finite-volume implementation, it reduces the wall-modeling cost significantly along with dramatic improvement in parallel efficiency when run on multiple cores. 
 
