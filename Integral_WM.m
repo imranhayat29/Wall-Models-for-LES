@@ -90,7 +90,7 @@ lz    = 3*pi;
 %========================================
 % User defined:
 %========================================
-nt_end  = 30;          % Time step upto which you want to run the simulation 
+nt_end  = 790;          % Time step upto which you want to run the simulation 
                         % Last time step for accompanying JHUTDB DNS data 
                         % is 799
                         
@@ -841,6 +841,7 @@ dpdx_imposed = 0;
     end
 
 end
+
 %*******************************************************************************
 %% Subroutine: iwm_slv
 %*******************************************************************************
