@@ -1,8 +1,8 @@
 %%**************************************************************************************%
 %                         Integral wall model for LES                                   %
 %***************************************************************************************%
-% This code is based on the integral wall model formulation developed and               %
-% outlined originally by Yang et. al in the following paper:                            %
+% This code is based on the integral wall model formulation originally                  %
+% developed and outlined by Yang et. al in the following paper:                         %
 %                                                                                       %
 % "Integral wall model for large eddy simulations of wall-bounded                       % 
 %  turbulent flows." Physics of Fluids 27.2 (2015): 025112.                             %
@@ -10,64 +10,90 @@
 % Modifications to the original wall-model that you see in this code                    %
 % are outlined in our upcoming work available on arXiv:                                 %
 %                                                                                       %
-% "Numerical implementation of efficient grid-free integral wall models                 %
-%  in unstructured-grid LES solvers" (Hayat & Park, 2021)                               %
+%  https://arxiv.org/abs/2111.02542                                                     % 
+%                                                                                       %
+% "Implementation and performance analysis of efficient grid-free integral              % 
+%  wall models in unstructured-grid LES solvers" (Hayat & Park, 2022)                   %
 %                                                                                       %
 %***************************************************************************************%
-% DNS data for apriori testing of this code can be found at the following               %
-% link:                                                                                 %
+% Accompanying files required:                                                          %
+%                                                                                       %   
+% 1. Channel_DNS_JHTDB_Retau1000 (contains 2 files: mean_data_jhu.xlsx,re-tau.xlsx)     %                                                                                       %    
+% 2. calc_grad.m                                                                        %
+% 3. DNS_dt=0.0325_ndiv=16_yp100.mat (can be downloaded from the link below)            %
+%                                                                                       %
+%***************************************************************************************%
+% Channel DNS data for the apriori testing of this code was acquired                    % 
+% from Johns Hopkins Turbulence database. A sample DNS dataset is made                  %
+% available on the following link:                                                      %
 %                                                                                       %
 % https://drive.google.com/drive/folders/1ESNdOrywOvNusEzFmAp7BWof_XUpvkUi?usp=sharing  %
 %                                                                                       %
 %***************************************************************************************%
+% Questions/feedback can be directed to the following email:                            %               
+% hayat3@seas.upenn.edu                                                                 %
+%                                                                                       %
+%***************************************************************************************%
 
-% Note: x=streamwise , y=spanwise , z=wall-normal
+% Note: x=streamwise , z=spanwise , y=wall-normal
+
+% Variable naming from paper:
+%
+% Integral terms
+%  Lx  : iwm_L(i,j,idx_Lu)
+%  Lxx : iwm_L(i,j,idx_Luu)
+%  Lz  : iwm_L(i,j,idx_Lw)
+%  Lzz : iwm_L(i,j,idx_Lww)
+%  Lxz : iwm_L(i,j,idx_Luw)
+%   
+% (tau_hwm-tau_w) : del_tau
 
 clc
 clear all
 
-global iwm_dirx iwm_diry iwm_DN iwm_Lu iwm_Luu iwm_Lv iwm_Lvv iwm_Luv ...
-       iwm_utx iwm_uty iwm_tauwx iwm_tauwy iwm_flt_tagvel iwm_flt_tagvel_m iwm_flt_p  ...
-       iwm_conv iwm_PrsGrad iwm_diff iwm_lhs iwm_flt_us ...
-       iwm_tR iwm_Dz iwm_Ax iwm_Ay iwm_Cx iwm_Cy iwm_dt iwm_inte iwm_inte_m ...
-       equil_flag div_flag neg_flag A_flag maxiter_flag neg_flag_uty neg_flag_V
+global idx_dirx idx_dirz idx_dim idx_Lu idx_Luu idx_Lw idx_Lww idx_Luw
 
 %**************************************************************************
 %% Define Indices
 %**************************************************************************
 
-% direction x (streamwise)
-iwm_dirx = 1;
-% direction y (spanwise)
-iwm_diry = 2;
+% direction x (local streamwise)
+idx_dirx = 1;
+% direction z (local spanwise)
+idx_dirz = 2;
 
 % local dimensions of wall, wall model always deal with 2D surfaces 
-iwm_DN  = 2;
+idx_dim  = 2;
 
 % integrated profile dimensions
-iwm_Lu  = 1;   % index for integral of u
-iwm_Luu = 2;   % index for integral of uu
-iwm_Lv  = 3;   % etc.
-iwm_Lvv = 4;
-iwm_Luv = 5;
+idx_Lu  = 1;   % index for integral of u
+idx_Luu = 2;   % index for integral of uu
+idx_Lw  = 3;   % etc.
+idx_Lww = 4;
+idx_Luw = 5;
 
 %**************************************************************************
 %% Function INPUTS
 %**************************************************************************
-%Constants:
-vonk    = 0.4;
-B       = 5;
-L_x     = 8*pi;         % Length of domain in axial direction!
-                        % Needed for dx for computing derivatives using Finite
-                        % difference
-L_y     = 3*pi;
-L_z     = 1; %2;
 
-%User defined
-nt_end  = 50;          % Time step upto which you want to run the 
-                        % simulation (Last time step for accompanying
-                        % JHUTDB DNS data is 800
+%========================================
+% Constants:
+%========================================
+vonk  = 0.4;
+B     = 5;
 
+% Length of domain in streamwise and spanwise direction.
+% (Needed for dx and dz for computing derivatives using Finite difference)
+lx    = 8*pi;         
+lz    = 3*pi;         
+
+%========================================
+% User defined:
+%========================================
+nt_end  = 30;          % Time step upto which you want to run the simulation 
+                        % Last time step for accompanying JHUTDB DNS data 
+                        % is 799
+                        
 theta   = 1;            % theta is the multiples of timescale used for time filtering 
 iwm_tol = 0.000001;     % for Newton Raphson
 iwm_eps = 0.000000001;  % for Newton Raphson
@@ -76,25 +102,26 @@ MaxIter = 1500;         % for Newton Raphson
 %Grid:
 ndiv    = 16;           % for undersampled DNS data (specific to JHU test case)
 nx      = 2048/ndiv;    % total x grid points for FVM etc...
-ny      = 1536/ndiv;          
-nz      = 1; %512;
-dx      = L_x/nx;       % grid size in x-direction
-dy      = L_y/ny;       % grid size in spanwise-direction
+nz      = 1536/ndiv;          
+dx      = lx/nx;        % grid size in x-direction
+dz      = lz/nz;        % grid size in spanwise-direction
 
 % hwm     = 0.1008     
 % dt      = 0.0065;     % hwm and LES timestep dt (for DNS test: database timestep)
-                        % are commented out here because I had stored it in
-                        % the input data file based on at what height and
+                        % are commented out here because they are stored in
+                        % the input DNS data file, based on at what height and
                         % timesteps the DNS data was extracted.
-                        
-cfl     = 1;            % CFL of LES (ONLY USED IN IC)
 
+%=====================================
+% DNS Data:
+%=====================================                      
+                        
 %load DNS data
 Ret_av_DNS = 999.35;    %fixed for JHTDB channel flow
 ut_av_DNS  = 0.049968;  %fixed for JHTDB channel flow
 nu         = 0.00005;   %fixed for JHTDB channel flow
 
-% The following .mat file contains JHTDB Channel DNS data from a plane at a
+% NOTE: The following .mat file contains JHTDB Channel DNS data from a plane at a
 % wall-normal distance of yplus=100 or y=0.1008 from the bottom wall. The 
 % data has been undersampled 16 times in each of the wall-parallel directions.
 % The snapshots are collected every dt=0.0325. 
@@ -102,168 +129,239 @@ nu         = 0.00005;   %fixed for JHTDB channel flow
 % The arrays contain data in the following form:
 % [k,i,j] : k is time dimension, i is streamwise and j is spanwise.
 
-load('DNS_dt=0.0325_ndiv=16_yp100.mat')  % Can be downloaded from the link on the top.
+load('DNS_dt=0.0325_ndiv=16_yp100.mat')  % Can be downloaded from the link 
+                                         % given on the top in the description.
 U_DNS   = U_full;
-V_DNS   = W_full;
-W_DNS   = V_full;
+W_DNS   = W_full;
 p_DNS   = P_full;
-clear U_full V_full W_full P_full;
+rho_DNS = ones(nt_end+1,nx,nz);          % DNS test case is incompressible flow
+clear U_full W_full P_full;
 
-jt_end  = nt_end;              % LES counter end-time
-% jt_end  = size(U_DNS,1);       % LES counter end-time
+% set the wall-model timestep as the same as LES timestep:
+iwm_dt = dt;
 
-u = zeros(nx,ny);
-v = zeros(nx,ny);          
-w = zeros(nx,ny);
-p = zeros(nx,ny);
+% set h_wm for each wall face (here it is constant, since DNS data is taken
+% from a plane at fixed height
+iwm_hwm(1:nx,1:nz) = hwm;
 
-dz = 2*hwm;
+%======================================
+% Allocate size to arrays 
+%======================================
+
+% These variables are only Input to the WM:
+u = zeros(nx,nz);
+w = zeros(nx,nz);          
+p = zeros(nx,nz);    
+grad_p_filt = zeros(nx,nz,idx_dim);          % 2 components for each wall face
+grad_L      = zeros(nx,nz,idx_Luw,idx_dim);  % 5 L's (Lu,Luu,Lw,Lww,Luw), 2
+                                             % components for each.
+
+% These variables are only output from the WM:
+tauw_x = zeros(nx,nz,nt_end);
+tauw_z = zeros(nx,nz,nt_end);
+
+% These variables are both input/output to/from the WM:
+U_tan_filt = zeros(nx,nz,idx_dim);
+del_tau    = zeros(nx,nz,idx_dim);
+iwm_L      = zeros(nx,nz,idx_Luw);
+p_filt     = zeros(nx,nz);
+iwm_filter = zeros(nx,nz);
+utau_filt  = zeros(nx,nz);
+
 %**************************************************************************
 %% Function OUTPUTS
 %**************************************************************************
-%mean:
-%   taux
-%   tauy
-%   wallmodel velocity profiles
+ 
+% mean tau_w_x
+% mean tau_w_z
+% mean wallmodel velocity profiles
+
 %**************************************************************************
 %%                          MAIN ROUTINE                                  %
 %**************************************************************************
 
-% Initialize all global variables
-Ui = mean(U_DNS(1,:,:),'all');       %use mean value of U-LES to approximate initial profile at all grid points on wall
-Vi = mean(V_DNS(1,:,:),'all');
+%================================
+% Initialization
+%================================
+
+% Initialize tau_w and all other quantities in the wall model
+% (we use mean value of U-LES to approximate initial profiles at all grid
+% points on wall)
+
+Ui = mean(U_DNS(1,:,:),'all');       
+Wi = mean(W_DNS(1,:,:),'all');
 Pi = mean(p_DNS(1,:,:),'all');
+rhoi = mean(rho_DNS(1,:,:),'all');
 
-initialize(nx,ny,dz,cfl,L_x,vonk,B,nu,iwm_tol,iwm_eps,Ui,Vi,Pi);
-
-% Allocate size to wall-stress output arrays (only store values at one time
-% instance)
-txz(nx,ny,1)  = 0;
-tyz(nx,ny,1)  = 0;
+[tauw_x(:,:,1),tauw_z(:,:,1),p_filt,iwm_filter, ...
+ utau_filt,del_tau,U_tan_filt,iwm_L] = initialize_iwm(nx,nz,hwm,vonk,B,nu,iwm_tol, ...
+                                                  iwm_eps,Ui,Wi,Pi,rhoi,iwm_dt);
 
 tic
+%====================================================================
 % Loops over all time steps available in the input field arrays
-for jt=1:jt_end
+%====================================================================
+
+for jt=1:nt_end
     
-    fprintf('t=%5.4d\n',jt*dt)
+    fprintf('t=%5.4d (%5.2f%% complete)\n', jt*dt, 100*jt/nt_end)
     
-    %LES solution (2 dimentional arrays)
+    %Instantaneous DNS data (LES data in WMLES) from the matching plane (2 dimentional arrays)
     u(:,:)  = U_DNS(jt+1,:,:);
-    v(:,:)  = V_DNS(jt+1,:,:);
+    w(:,:)  = W_DNS(jt+1,:,:);   
     p(:,:)  = p_DNS(jt+1,:,:);
-    w(:,:)  = W_DNS(jt+1,:,:);
+    rho(:,:)= rho_DNS(jt+1,:,:);
     
-    % time step seen by the wall model
-    iwm_dt = dt;
+    % Compute the surface gradients required on RHS of eqn (C22) in Yang et al 2015
+    % Note that each gradient has 2 components, one in x and the other in z.
+    % The subroutine calc_grad computes the surface gradients with periodic
+    % boundary conditions assumed.
     
-    % Compute the wall stress
+    [grad_L(:,:,idx_Lu ,idx_dirx), grad_L(:,:,idx_Lu ,idx_dirz) ]= calc_grad(nx,nz,dx,dz,iwm_L(:,:,idx_Lu) );
+    [grad_L(:,:,idx_Luu,idx_dirx), grad_L(:,:,idx_Luu,idx_dirz) ]= calc_grad(nx,nz,dx,dz,iwm_L(:,:,idx_Luu));
+    [grad_L(:,:,idx_Lw ,idx_dirx), grad_L(:,:,idx_Lw ,idx_dirz) ]= calc_grad(nx,nz,dx,dz,iwm_L(:,:,idx_Lw) );
+    [grad_L(:,:,idx_Lww,idx_dirx), grad_L(:,:,idx_Lww,idx_dirz) ]= calc_grad(nx,nz,dx,dz,iwm_L(:,:,idx_Lww));    
+    [grad_L(:,:,idx_Luw,idx_dirx), grad_L(:,:,idx_Luw,idx_dirz) ]= calc_grad(nx,nz,dx,dz,iwm_L(:,:,idx_Luw));    
+    [grad_p_filt(:,:,idx_dirx)   , grad_p_filt(:,:,idx_dirz)    ]= calc_grad(nx,nz,dx,dz,p_filt(:,:));
+
     
-    % Update the convective term, turbulent diffusion term etc. on LHS of eqn
-    % C22 in Yang et al 2015
-    iwm_calc_lhs(nx,ny,dx,dy,u,v,p);
+    % NOTE: At this point all required inputs to the wall model are 
+    % available at each wall face.    
     
-    % the subroutine to calculate wall stress
-    iwm_calc_wallstress(nx,ny,iwm_tol,iwm_eps,MaxIter,nu,vonk,B,theta,jt*dt);
-    
-    % Imposing tauw_x, tauw_y in the LES solver as a boundary condition
+    %======================================================================
+    % Loop over all wall faces and compute the wall stress at each wall face
+    %======================================================================      
     for iwm_i = 1:nx
-        for iwm_j = 1:ny
-            % wall stress, use the value calculated in iwm
-            txz(iwm_i,iwm_j,jt) = iwm_tauwx(iwm_i,iwm_j);
-            tyz(iwm_i,iwm_j,jt) = iwm_tauwy(iwm_i,iwm_j);
+        for iwm_j = 1:nz
+            
+            % local values at each wall face to be fed to iwm_calc_wallstress routine
+            hwm_l        = iwm_hwm     (iwm_i,iwm_j);
+            rho_l        = rho         (iwm_i,iwm_j);
+            u_l          = u           (iwm_i,iwm_j);
+            w_l          = w           (iwm_i,iwm_j);
+            p_l          = p           (iwm_i,iwm_j);
+            p_filt_l     = p_filt      (iwm_i,iwm_j);
+            iwm_filter_l = iwm_filter  (iwm_i,iwm_j);
+            utau_filt_l  = utau_filt   (iwm_i,iwm_j);           
+            grad_p_l     = grad_p_filt (iwm_i,iwm_j,:);
+            del_tau_l    = del_tau     (iwm_i,iwm_j,:);
+            U_tan_filt_l = U_tan_filt  (iwm_i,iwm_j,:);
+            iwm_L_l      = iwm_L       (iwm_i,iwm_j,:);
+            grad_L_l(:,:)= grad_L      (iwm_i,iwm_j,:,:);
+            
+            %==============================================================
+            % Call the wall-stress calculation routine to get wall stress at
+            % the current wallface at (iwm_i,iwm_j)
+            %==============================================================             
+            
+            % the subroutine to calculate wall stress
+            [twx,twz,Ax,Cx,p_filt_l,iwm_filter_l,...
+             utau_filt_l,del_tau_l,U_tan_filt_l, ...
+             iwm_L_l,equil_flag] ...
+                     = iwm_calc_wallstress(hwm_l,rho_l,u_l,w_l,p_l,p_filt_l, ...
+                       iwm_tol,iwm_eps,MaxIter,nu,vonk,B,theta,grad_L_l,grad_p_l,  ...
+                       iwm_i,iwm_j,iwm_dt,iwm_filter_l,utau_filt_l,del_tau_l,...
+                       U_tan_filt_l,iwm_L_l);
+
+            % Imposing tauw_x, tauw_z in the LES solver as a boundary
+            % condition wall stress
+            tauw_x(iwm_i,iwm_j,jt) = twx;
+            tauw_z(iwm_i,iwm_j,jt) = twz;
+
+            % Update variables that will be used by the WM at next timestep                   
+            p_filt    (iwm_i,iwm_j)   =     p_filt_l;
+            iwm_filter(iwm_i,iwm_j)   = iwm_filter_l;            
+            utau_filt (iwm_i,iwm_j)   =  utau_filt_l;
+            del_tau   (iwm_i,iwm_j,:) =    del_tau_l;
+            U_tan_filt(iwm_i,iwm_j,:) = U_tan_filt_l;
+            iwm_L     (iwm_i,iwm_j,:) =      iwm_L_l;
+            
+            %==============================================================
+            % Store velocity profiles for plotting
+            %==============================================================              
+            
+            % Instantaneous velocity profile
+            utx = sign(twx)*sqrt(abs(twx)/rho_l);
+            utz = sign(twz)*sqrt(abs(twz)/rho_l);
+            
+            Vel = sqrt(U_tan_filt_l(idx_dirx)^2. +U_tan_filt_l(idx_dirz)^2.);
+            utau = (utx^4.+utz^4.)^0.25;
+
+            yy      = logspace(log10(11*nu/utau),log10(1),100);
+            yy_shrt = logspace(log10(0.0001), log10(11*nu/utau), 50);
+            
+            if equil_flag == 0
+                del_visc = nu*sqrt(utx^2.+utz^2.)/(utau^2.0);
+                
+                ulog(iwm_i,iwm_j,:)= utau*((U_tan_filt_l(idx_dirx)/Vel)*...
+                                (log(yy/hwm_l)/vonk)  + Ax*(yy/hwm_l) + Cx);
+                uvisc(iwm_i,iwm_j,:)=utx*yy_shrt/del_visc;
+            else
+                del_visc = nu/utau;
+                
+                ulog(iwm_i,iwm_j,:)= utau*(U_tan_filt_l(idx_dirx)/Vel)*...
+                                          (log(yy/del_visc)/vonk + B);
+                uvisc(iwm_i,iwm_j,:)=utau*(U_tan_filt_l(idx_dirx)/Vel)*...
+                                          yy_shrt/del_visc;
+            end           
         end
     end
     
     % Collect some Stats
-    tauw_tot(:,:,jt) = sqrt(txz(:,:,jt).^2 + tyz(:,:,jt).^2);
+    tauw_tot(:,:,jt) = sqrt(tauw_x(:,:,jt).^2 + tauw_z(:,:,jt).^2);
     tauw_wm(jt)      = mean(tauw_tot(:,:,jt),'all');
-    eqmrate(jt)      = nnz(equil_flag)/numel(equil_flag);
-    tR(jt)           = mean(iwm_tR(:,:),'all');
-    
-    % Flags for Diagnostics
-    mat_eqm(jt,:)    = equil_flag(:,2);
-    mat_div(jt,:)    = div_flag(:,2);
-    mat_neg(jt,:)    = neg_flag(:,2);
-    mat_maxiter(jt,:)= maxiter_flag(:,2);
-    mat_A(jt,:)      = A_flag(:,2);
-    
-    divrate(jt,:)    = nnz(div_flag)/numel(div_flag);
-    negrate(jt,:)    = nnz(neg_flag)/numel(neg_flag);
-    Arate(jt,:)      = nnz(A_flag)/numel(A_flag);
-    maxiterrate(jt,:)= nnz(maxiter_flag)/numel(maxiter_flag);
-    
-    % Mean velocity profile and instantaneous profile to get flow angle vs wall-normal
-    % direction
-    for iwm_i = 1:nx
-        for iwm_j = 1:ny
-            Vel = sqrt(iwm_flt_tagvel(iwm_i,iwm_j,iwm_dirx)^2. +iwm_flt_tagvel(iwm_i,iwm_j,iwm_diry)^2.);
-            utau = (iwm_utx(iwm_i,iwm_j)^4.+iwm_uty(iwm_i,iwm_j)^4. )^0.25;
-            
-            
-            Dz = iwm_Dz(iwm_i,iwm_j);
-            zz      = logspace(log10(11*nu/utau),log10(1),100);
-            zz_shrt = logspace(log10(0.0001), log10(11*nu/utau), 50);
-            
-            if equil_flag(iwm_i,iwm_j)==0
-                del_visc = nu*sqrt(iwm_utx(iwm_i,iwm_j)^2.+iwm_uty(iwm_i,iwm_j)^2.)/(utau^2.0);
-                
-                ulog(iwm_i,iwm_j,:)= utau*((iwm_flt_tagvel(iwm_i,iwm_j,iwm_dirx)/Vel)*(log(zz/Dz)/vonk)  + iwm_Ax(iwm_i,iwm_j)*(zz/Dz) + iwm_Cx(iwm_i,iwm_j));
-                uvisc(iwm_i,iwm_j,:)=iwm_utx(iwm_i,iwm_j)*zz_shrt/del_visc;
-                vvisc(iwm_i,iwm_j,:)=iwm_uty(iwm_i,iwm_j)*zz_shrt/del_visc;
-            else
-                del_visc = nu/utau;
-                
-                ulog(iwm_i,iwm_j,:)= utau*(iwm_flt_tagvel(iwm_i,iwm_j,iwm_dirx)/Vel)*(log(zz/del_visc)/vonk + B);
-                uvisc(iwm_i,iwm_j,:)=utau*(iwm_flt_tagvel(iwm_i,iwm_j,iwm_dirx)/Vel)*zz_shrt/del_visc;
-                vvisc(iwm_i,iwm_j,:)=utau*(iwm_flt_tagvel(iwm_i,iwm_j,iwm_diry)/Vel)*zz_shrt/del_visc;
-            end
-            
-        end
-    end
-    
+
+    % Spatially averaged velocity profile
     ulog_m(jt,:)  = mean(ulog ,[1 2]);
-    uvisc_m(jt,:) = mean(uvisc,[1 2]);
+    uvisc_m(jt,:) = mean(uvisc,[1 2]);   
     
 end
 toc
 
+% Mean (time-averaged) velocity profiles
 ulog_p = mean(ulog_m(10:end,:),1)/ut_av_DNS;
 uvisc_p = mean(uvisc_m(10:end,:),1)/ut_av_DNS;
 
-%% ************** PLOT RESULTS **************
-%%%%%% Plot Profiles %%%%%%
-
-semilogx(zz/(nu/ut_av_DNS),ulog_p,'r','LineWidth',2);
-hold on
-semilogx(zz_shrt/(nu/ut_av_DNS),uvisc_p,'b','LineWidth',2);
-% semilogx(Dz/del_visc,u_log_Dz,'k+');      % at matching location
-xlabel('y+');
-ylabel('U+');
-xlim([0.1 2000]);
-ylim([0 26]);
+%**************************************************************************
+%% PLOT RESULTS
+%**************************************************************************
+ 
+%===============================
+% Plot Profiles
+%===============================
 
 %Import DNS data for plotting profile
 ll     = xlsread('Channel_DNS_JHTDB_Retau1000/mean_data_jhu');   
-zpll   = ll(:,2);
+ypll   = ll(:,2);
 Upll   = ll(:,3);
-semilogx(zpll,Upll,'k.');
+semilogx(ypll,Upll,'k.','MarkerSize',5);
+hold on
 
-legend('log-layer','viscous sublayer','mean-DNS (JHU Re_{\tau}=1000)','Location','NorthWest')
-% legend('log-layer','viscous sublayer','At h^{+}_{wm}','mean-DNS (JHU Re_{\tau}=1000)','Location','NorthWest')
+semilogx(yy(1:49)/(nu/ut_av_DNS),ulog_p(1:49),'r','LineWidth',2.5);
+semilogx(yy_shrt/(nu/ut_av_DNS),uvisc_p,'b','LineWidth',2.5);
+
+xlabel('$y^{+}$','Interpreter','Latex');
+ylabel('$U^{+}$','Interpreter','Latex');
+xlim([0.1 2000]);
+ylim([0 26]);
 
 
-%%%%% Plot tauw ratio vs time %%%%%
+legend('mean-DNS (JHU Re_{\tau}=1000)','log-layer','viscous sublayer','Location','NorthWest')
+
+%================================
+% Plot tau_w ratio vs time
+%================================
 mm       = xlsread('Channel_DNS_JHTDB_Retau1000/re-tau');
 time_dns = mm(:,1);
 ret_dns  = mm(:,2);
 tw_DNS   = (nu*ret_dns).^2;
 
-tt = 1:jt_end;
+tt = 1:nt_end;
 tratio_wm  = abs(tauw_wm)/ut_av_DNS^2;
 tratio_DNS = tw_DNS/ut_av_DNS^2;
 
 figure
-plot(tt*dt,tratio_wm);
+plot(tt*dt,tratio_wm,'r');
 hold on
 plot(time_dns,tratio_DNS,'k');
 xlabel('t');
@@ -275,709 +373,527 @@ legend('IWM','DNS','Location','NorthEast')
 title('Spatially-averaged wall stress magnitude normalized by mean DNS wall stress')
 
 
+
 %**************************************************************************
 %%                           SUBROUTINES                                   %
+
 %**************************************************************************
-% subroutine Initialize
+%% Subroutine: initialize_iwm
 %**************************************************************************
-% This subroutine initializes the wall model with plug flow
-% conditions (assuming axial flow in x only)
+% This subroutine initializes the wall model with plug flow conditions
 
-function initialize(nx,ny,dz,cfl,L_x,vonk,B,nu,iwm_tol,iwm_eps,Ui,Vi,Pi)
+function [tauw_x,tauw_z,p_filt,iwm_filter,utau_filt,del_tau, ...
+         U_tan_filt,iwm_L] = initialize_iwm(nx,nz,hwm,vonk,B,nu,iwm_tol, ...
+                                        iwm_eps,Ui,Wi,Pi,rhoi,dt)
 
-global iwm_dirx iwm_diry iwm_DN iwm_Lu iwm_Luu iwm_Lv iwm_Lvv iwm_Luv ...
-       iwm_utx iwm_uty iwm_tauwx iwm_tauwy iwm_flt_tagvel iwm_flt_tagvel_m iwm_flt_p  ...
-       iwm_conv iwm_PrsGrad iwm_diff iwm_lhs iwm_flt_us ...
-       iwm_tR iwm_Dz iwm_Ax iwm_Ay iwm_Cx iwm_Cy iwm_dt iwm_inte iwm_inte_m
-
-% initial value for the x and y-velocity at first grid point
+global idx_dirx idx_dirz idx_dim idx_Lu idx_Luu idx_Lw idx_Lww idx_Luw
+        
+% initial value for the x and z-velocity at first grid point
 uinit = Ui;
-vinit = Vi;
+winit = Wi;
 
-% at the height of the first grid point (h_wm)
-Dz = dz/2.;
+% filitered velocity at the first grid point in x, z directions
+U_tan_filt(1:nx,1:nz,idx_dirx) = uinit;
+U_tan_filt(1:nx,1:nz,idx_dirz) = winit;
 
-% cell height
-iwm_Dz(1:nx,1:ny) = Dz; 
+%==========================================================================
+% Note: We initialize utx and utz with standard log-law for equilibrium 
 
-% filitered velocity at the first grid point in x, y directions
-iwm_flt_tagvel  (1:nx,1:ny,iwm_dirx) = uinit;
-iwm_flt_tagvel  (1:nx,1:ny,iwm_diry) = vinit;
-iwm_flt_tagvel_m(1:nx,1:ny,iwm_dirx) = uinit;
-iwm_flt_tagvel_m(1:nx,1:ny,iwm_diry) = vinit;
-
-%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
-% % Note: We initialize utx and uty with standard log-law for equilibrium 
-
-% set tolerance for
-tol_eqm = iwm_tol;
-eps_eqm = iwm_eps;
-
-Vel = sqrt(uinit^2. + vinit^2.);
+Vel = sqrt(uinit^2. + winit^2.);
 Uproj = uinit/Vel;
-Vproj = vinit/Vel;
+Wproj = winit/Vel;
 
 equilut = sign(Vel);
-feqm = (equilut/vonk)*log(Dz*equilut/nu) + B*equilut - Vel;
+feqm = (equilut/vonk)*log(hwm*equilut/nu) + B*equilut - Vel;
 
 iterm=0;
-while abs(feqm) > tol_eqm && iterm <= 20
-    ut_p = equilut + eps_eqm;
-    feqm_ps = (ut_p/vonk)*log(Dz*ut_p/nu) + B*ut_p - Vel;
-    a = (feqm_ps - feqm)/eps_eqm;
+while abs(feqm) > iwm_tol && iterm <= 20
+    ut_p = equilut + iwm_eps;
+    feqm_ps = (ut_p/vonk)*log(hwm*ut_p/nu) + B*ut_p - Vel;
+    a = (feqm_ps - feqm)/iwm_eps;
     equilut = equilut - feqm/a;
     
-    feqm = (equilut/vonk)*log(Dz*equilut/nu) + B*equilut - Vel;
+    feqm = (equilut/vonk)*log(hwm*equilut/nu) + B*equilut - Vel;
     iterm = iterm + 1;
 end
 
 equilutx = real(equilut*sqrt(Uproj));
-equiluty = real(equilut*sqrt(Vproj));
+equilutz = real(equilut*sqrt(Wproj));
 
-%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+%==========================================================================
 
-utau = (equilutx^4.+equiluty^4.)^0.25;
+utau = (equilutx^4.+equilutz^4.)^0.25;
 deli = 11*nu/utau;
 delv = nu/utau;
-rat  = deli/Dz;
+rat  = deli/hwm;
 
-% us in x, y directions
-iwm_utx(1:nx,1:ny) = equilutx;
-iwm_uty(1:nx,1:ny) = equiluty;
-
-% wall stress in x, y directions
-iwm_tauwx(1:nx,1:ny) = sign(equilutx)*equilutx^2.;
-iwm_tauwy(1:nx,1:ny) = sign(equiluty)*equiluty^2.;
+% wall stress in x, z directions
+tauw_x(1:nx,1:nz) = sign(equilutx)*rhoi*equilutx^2.;
+tauw_z(1:nx,1:nz) = sign(equilutz)*rhoi*equilutz^2.;
 
 % pressure at first grid point
-iwm_flt_p(1:nx,1:ny) = Pi;
+p_filt(1:nx,1:nz) = Pi;
 
-% integrals of Lu, Lv, etc.
-iwm_inte(1:nx,1:ny,iwm_Lu)  = utau*Uproj*(0.5*(deli^2.0)/delv + Dz*( B*(1-rat)...
-                              - 1.0/vonk*(1-rat+rat*log(deli/delv)-log(Dz/delv)) ));
+% integrals of Lu, Lw, etc.
+iwm_L(1:nx,1:nz,idx_Lu)  = utau*Uproj*(0.5*(deli^2.0)/delv + hwm*( B*(1-rat)...
+                              - 1.0/vonk*(1-rat+rat*log(deli/delv)-log(hwm/delv)) ));
         
-iwm_inte(1:nx,1:ny,iwm_Lv)  = utau*Vproj*(0.5*(deli^2.0)/delv + Dz*( B*(1-rat)...
-                              - 1.0/vonk*(1-rat+rat*log(deli/delv)-log(Dz/delv)) ));
+iwm_L(1:nx,1:nz,idx_Lw)  = utau*Wproj*(0.5*(deli^2.0)/delv + hwm*( B*(1-rat)...
+                              - 1.0/vonk*(1-rat+rat*log(deli/delv)-log(hwm/delv)) ));
                           
-iwm_inte(1:nx,1:ny,iwm_Luu) = (utau*Uproj)^2 * (1.0/3.0*(deli^3.0/delv^2.0)+...
-            Dz*((1.0/vonk)^2*((log(Dz/delv) - 1)^2.0 -rat*(log(deli/delv) - 1)^2.0 + 1-rat) ...
-            +(2*B/vonk)*((log(Dz/delv) - 1) -rat*(log(deli/delv) - 1)) + B^2.0*(1-rat))); 
+iwm_L(1:nx,1:nz,idx_Luu) = (utau*Uproj)^2 * (1.0/3.0*(deli^3.0/delv^2.0)+...
+            hwm*((1.0/vonk)^2*((log(hwm/delv) - 1)^2.0 -rat*(log(deli/delv) - 1)^2.0 + 1-rat) ...
+            +(2*B/vonk)*((log(hwm/delv) - 1) -rat*(log(deli/delv) - 1)) + B^2.0*(1-rat))); 
         
-iwm_inte(1:nx,1:ny,iwm_Lvv) = (utau*Vproj)^2 * (1.0/3.0*(deli^3.0/delv^2.0)+...
-            Dz*((1.0/vonk)^2*((log(Dz/delv) - 1)^2.0 -rat*(log(deli/delv) - 1)^2.0 + 1-rat) ...
-            +(2*B/vonk)*((log(Dz/delv) - 1) -rat*(log(deli/delv) - 1)) + B^2.0*(1-rat)));  
+iwm_L(1:nx,1:nz,idx_Lww) = (utau*Wproj)^2 * (1.0/3.0*(deli^3.0/delv^2.0)+...
+            hwm*((1.0/vonk)^2*((log(hwm/delv) - 1)^2.0 -rat*(log(deli/delv) - 1)^2.0 + 1-rat) ...
+            +(2*B/vonk)*((log(hwm/delv) - 1) -rat*(log(deli/delv) - 1)) + B^2.0*(1-rat)));  
         
-iwm_inte(1:nx,1:ny,iwm_Luv) = (utau^2)*Uproj*Vproj*(1.0/3.0*(deli^3.0/delv^2.0)+...
-            Dz*((1.0/vonk^2)*((log(Dz/delv) - 1)^2.0 -rat*(log(deli/delv) - 1)^2.0 + 1-rat) ...
-            +(2*B/vonk)*((log(Dz/delv) - 1) -rat*(log(deli/delv) - 1)) + B^2.0*(1-rat)));  
-
-iwm_inte_m(1:nx,1:ny,iwm_Lu)  = iwm_inte(1:nx,1:ny,iwm_Lu);
-iwm_inte_m(1:nx,1:ny,iwm_Lv)  = iwm_inte(1:nx,1:ny,iwm_Lv);
-iwm_inte_m(1:nx,1:ny,iwm_Luu) = iwm_inte(1:nx,1:ny,iwm_Luu);
-iwm_inte_m(1:nx,1:ny,iwm_Lvv) = iwm_inte(1:nx,1:ny,iwm_Lvv);
-iwm_inte_m(1:nx,1:ny,iwm_Luv) = iwm_inte(1:nx,1:ny,iwm_Luv);
-
-% Each term in the integral equation and top/bottom derivatives
-iwm_conv(1:nx,1:ny,1:iwm_DN)         = 0.;
-iwm_PrsGrad(1:nx,1:ny,1:iwm_DN)      = 0.;
-iwm_diff(1:nx,1:ny,1:iwm_DN)         = 0.;
-iwm_lhs(1:nx,1:ny,iwm_dirx)          = -iwm_inte(1:nx,1:ny,iwm_Lu);     %ignore all terms multiplied by dt
-iwm_lhs(1:nx,1:ny,iwm_diry)          = -iwm_inte(1:nx,1:ny,iwm_Lv);
-
-% filtered friction velocity and the filtering time scale, tR<1
-% Note: (cfl*L_x/nx/uinit) gives the LES time step
-iwm_flt_us(1:nx,1:ny) = utau;
-iwm_tR(1:nx,1:ny)     = (cfl*L_x/nx/uinit)/(Dz/vonk/equilutx); 
-
-% linear correction to the log profile
-iwm_Ax(1:nx,1:ny) = 0.;
-iwm_Ay(1:nx,1:ny) = 0.;
-iwm_Cx(1:nx,1:ny) = 0.;
-iwm_Cy(1:nx,1:ny) = 0.;
-
-% time step seen by the iwm
-iwm_dt = (cfl*L_x/nx/uinit);
-
-end
-
-%**************************************************************************
-%% subroutine iwm_calc_lhs()
-%**************************************************************************
-% This subroutine calculates the left hand side of the iwm system.
-
-function iwm_calc_lhs(nx,ny,dx,dy,u,v,p)
-
-global iwm_dirx iwm_diry iwm_Lu iwm_Luu iwm_Lv iwm_Lvv iwm_Luv ...
-       iwm_flt_tagvel iwm_flt_tagvel_m iwm_flt_p  ...
-       iwm_conv iwm_PrsGrad iwm_diff iwm_lhs ...
-       iwm_tR iwm_Dz iwm_dt iwm_inte iwm_inte_m
-
-% update u, v for the previous time step
-for iwm_i = 1:nx
-    for iwm_j = 1:ny
-        iwm_flt_tagvel_m(iwm_i,iwm_j,iwm_dirx) = iwm_flt_tagvel(iwm_i,iwm_j,iwm_dirx);
-        iwm_flt_tagvel_m(iwm_i,iwm_j,iwm_diry) = iwm_flt_tagvel(iwm_i,iwm_j,iwm_diry);
-    end
-end
-
-% temporal filtering
-for iwm_i=1:nx
-    for iwm_j=1:ny
-        iwm_flt_tagvel(iwm_i,iwm_j,iwm_dirx) =                               ...
-            iwm_flt_tagvel(iwm_i,iwm_j,iwm_dirx)*(1.-iwm_tR(iwm_i,iwm_j))    ...
-            + u(iwm_i,iwm_j)*iwm_tR(iwm_i,iwm_j);
-        
-        iwm_flt_tagvel(iwm_i,iwm_j,iwm_diry) =                               ...
-            iwm_flt_tagvel(iwm_i,iwm_j,iwm_diry)*(1.-iwm_tR(iwm_i,iwm_j))    ...
-            + v(iwm_i,iwm_j)*iwm_tR(iwm_i,iwm_j);
-        
-        iwm_flt_p(iwm_i,iwm_j) = iwm_flt_p(iwm_i,iwm_j)                      ...
-            * (1.-iwm_tR(iwm_i,iwm_j))                                       ...
-            + p(iwm_i,iwm_j)*iwm_tR(iwm_i,iwm_j);
-    end
-end
-
-% calculate LHS, calculation of the integrals is done from the last time step
-% in the subroutine iwm_calc_wallstress, so is iwm_diff
-for iwm_i = 1:nx
-    for iwm_j = 1:ny
-        
-        % the convective term
-        if iwm_i==1
-            phip = iwm_inte(iwm_i+1,iwm_j,iwm_Luu);             
-            phim = iwm_inte(nx,iwm_j,iwm_Luu);        %based on periodic condition with FVM
-        elseif iwm_i==nx
-            phip = iwm_inte(1,iwm_j,iwm_Luu);
-            phim = iwm_inte(iwm_i-1,iwm_j,iwm_Luu);
-        else
-            phip = iwm_inte(iwm_i+1,iwm_j,iwm_Luu);
-            phim = iwm_inte(iwm_i-1,iwm_j,iwm_Luu);
-        end
-        Luux = (phip-phim)/dx/2.;
-
-        
-        if iwm_j==1
-            phip = iwm_inte(iwm_i,iwm_j+1,iwm_Luv);
-            phim = iwm_inte(iwm_i,ny,iwm_Luv);
-        elseif iwm_j==ny
-            phip = iwm_inte(iwm_i,1,iwm_Luv);
-            phim = iwm_inte(iwm_i,iwm_j-1,iwm_Luv);
-        else
-            phip = iwm_inte(iwm_i,iwm_j+1,iwm_Luv);
-            phim = iwm_inte(iwm_i,iwm_j-1,iwm_Luv);
-        end
-        Luvy = (phip-phim)/dy/2.;
-
-        
-        if iwm_i==1
-            phip = iwm_inte(iwm_i+1,iwm_j,iwm_Luv);
-            phim = iwm_inte(nx,iwm_j,iwm_Luv);
-        elseif iwm_i==nx
-            phip = iwm_inte(1,iwm_j,iwm_Luv);
-            phim = iwm_inte(iwm_i-1,iwm_j,iwm_Luv);
-        else
-            phip = iwm_inte(iwm_i+1,iwm_j,iwm_Luv);
-            phim = iwm_inte(iwm_i-1,iwm_j,iwm_Luv);
-        end
-        Luvx = (phip-phim)/dx/2.;        
- 
-        
-        if iwm_j==1
-            phip = iwm_inte(iwm_i,iwm_j+1,iwm_Lvv);
-            phim = iwm_inte(iwm_i,ny,iwm_Lvv);
-        elseif iwm_j==ny
-            phip = iwm_inte(iwm_i,1,iwm_Lvv);
-            phim = iwm_inte(iwm_i,iwm_j-1,iwm_Lvv);
-        else
-            phip = iwm_inte(iwm_i,iwm_j+1,iwm_Lvv);
-            phim = iwm_inte(iwm_i,iwm_j-1,iwm_Lvv);
-        end
-        Lvvy = (phip-phim)/dy/2.;
-
-        
-        if iwm_i==1
-            phip = iwm_inte(iwm_i+1,iwm_j,iwm_Lu);
-            phim = iwm_inte(nx,iwm_j,iwm_Lu);
-        elseif iwm_i==nx
-            phip = iwm_inte(1,iwm_j,iwm_Lu);
-            phim = iwm_inte(iwm_i-1,iwm_j,iwm_Lu);
-        else
-            phip = iwm_inte(iwm_i+1,iwm_j,iwm_Lu);
-            phim = iwm_inte(iwm_i-1,iwm_j,iwm_Lu);
-        end
-        Lux = (phip-phim)/dx/2.;
-        
-        
-        if iwm_j==1
-            phip = iwm_inte(iwm_i,iwm_j+1,iwm_Lv);
-            phim = iwm_inte(iwm_i,ny,iwm_Lv);
-        elseif iwm_j==ny
-            phip = iwm_inte(iwm_i,1,iwm_Lv);
-            phim = iwm_inte(iwm_i,iwm_j-1,iwm_Lv);
-        else
-            phip = iwm_inte(iwm_i,iwm_j+1,iwm_Lv);
-            phim = iwm_inte(iwm_i,iwm_j-1,iwm_Lv);
-        end
-        Lvy = (phip-phim)/dy/2.;
-        
-        iwm_conv(iwm_i,iwm_j,iwm_dirx) = Luux + Luvy                               ...
-            - iwm_flt_tagvel_m(iwm_i,iwm_j,iwm_dirx)*(Lux+Lvy);
-        iwm_conv(iwm_i,iwm_j,iwm_diry) = Luvx + Lvvy                               ...
-            - iwm_flt_tagvel_m(iwm_i,iwm_j,iwm_diry)*(Lux+Lvy);
-        
-        % the pressure gradient term
-        if iwm_i==1
-            phip = iwm_flt_p(iwm_i+1,iwm_j);
-            phim = iwm_flt_p(nx,iwm_j);
-        elseif iwm_i==nx
-            phip = iwm_flt_p(1,iwm_j);
-            phim = iwm_flt_p(iwm_i-1,iwm_j);
-        else
-            phip = iwm_flt_p(iwm_i+1,iwm_j);
-            phim = iwm_flt_p(iwm_i-1,iwm_j);
-        end
-        
-        iwm_PrsGrad(iwm_i,iwm_j,iwm_dirx) = (phip-phim)/dx/2.                ...
-            * iwm_Dz(iwm_i,iwm_j);  %- 0.1*iwm_Dz(iwm_i,iwm_j);  %mean pressure gradient
-        
-        if iwm_j==1
-            phip = iwm_flt_p(iwm_i,iwm_j+1);
-            phim = iwm_flt_p(iwm_i,ny);
-        elseif iwm_j==ny
-            phip = iwm_flt_p(iwm_i,1);
-            phim = iwm_flt_p(iwm_i,iwm_j-1);
-        else
-            phip = iwm_flt_p(iwm_i,iwm_j+1);
-            phim = iwm_flt_p(iwm_i,iwm_j-1);
-        end
-        iwm_PrsGrad(iwm_i,iwm_j,iwm_diry) = (phip-phim)/dy/2.                ...
-            * iwm_Dz(iwm_i,iwm_j);
-        
-        % the left hand side (this is f(y,t) in ODE: y'= f(y,t) , y = L )
-        % this is the integrated momentum equation, except for the Lu term
-        iwm_lhs(iwm_i,iwm_j,iwm_dirx) = -iwm_inte(iwm_i,iwm_j,iwm_Lu)              ...
-            + iwm_dt*( iwm_conv(iwm_i,iwm_j,iwm_dirx)                              ...
-            + iwm_PrsGrad(iwm_i,iwm_j,iwm_dirx)                                    ...
-            - iwm_diff(iwm_i,iwm_j,iwm_dirx) );
-        
-        % this is the integrated momentum equation, except for the Lv term
-        iwm_lhs(iwm_i,iwm_j,iwm_diry) = -iwm_inte(iwm_i,iwm_j,iwm_Lv)              ...
-            + iwm_dt*( iwm_conv(iwm_i,iwm_j,iwm_diry)                              ...
-            + iwm_PrsGrad(iwm_i,iwm_j,iwm_diry)                                    ...
-            - iwm_diff(iwm_i,iwm_j,iwm_diry) );
-    end
-end
-
-end
-
-%**************************************************************************
-%% subroutine iwm_calc_wallstress
-%**************************************************************************
-
-function iwm_calc_wallstress(nx,ny,iwm_tol,iwm_eps,MaxIter,nu,vonk,B,theta,t)
-
-global iwm_dirx iwm_diry iwm_Lu iwm_Luu iwm_Lv iwm_Lvv iwm_Luv ...
-       iwm_utx iwm_uty iwm_tauwx iwm_tauwy iwm_flt_tagvel ...
-       iwm_diff iwm_lhs iwm_dudzT iwm_flt_us ...
-       iwm_tR iwm_Dz iwm_Ax iwm_Ay iwm_Cx iwm_Cy iwm_dt iwm_inte iwm_inte_m ...
-       equil_flag ...
-       div_flag neg_flag A_flag maxiter_flag neg_flag_uty neg_flag_V deli_flag
-       
+iwm_L(1:nx,1:nz,idx_Luw) = (utau^2)*Uproj*Wproj*(1.0/3.0*(deli^3.0/delv^2.0)+...
+            hwm*((1.0/vonk^2)*((log(hwm/delv) - 1)^2.0 -rat*(log(deli/delv) - 1)^2.0 + 1-rat) ...
+            +(2*B/vonk)*((log(hwm/delv) - 1) -rat*(log(deli/delv) - 1)) + B^2.0*(1-rat)));  
    
-for iwm_i=1:nx
-for iwm_j=1:ny
+% RHS terms in the integral equation to be used in the next timestep
+del_tau(1:nx,1:nz,1:idx_dim) = 0.;
 
-% Note: We initialize utx and uty with standard log-law used in equilibrium flag 
+% filtered friction velocity and the filtering time scale
+utau_filt(1:nx,1:nz) = utau;
+iwm_filter(1:nx,1:nz)= dt/(hwm/vonk/equilutx); 
 
-    % set tolerance for 
-    tol_eqm = iwm_tol;
-    eps_eqm = iwm_eps;
+end
+
+%**************************************************************************
+%% Subroutine: iwm_calc_wallstress
+%**************************************************************************
+
+function [tauw_x,tauw_z,Ax,Cx,p_filt,iwm_filter,utau_filt,del_tau,U_tan_filt, ...
+          iwm_L,equil_flag] = iwm_calc_wallstress(hwm,rho,u,v,p,p_filt, ...
+          iwm_tol,iwm_eps,MaxIter,nu,vonk,B,theta, grad_L,grad_p_filt, ...
+          iwm_i,iwm_j,iwm_dt,iwm_filter,utau_filt,del_tau,U_tan_filt,iwm_L)
+
+global idx_dirx idx_dirz idx_Lu idx_Luu idx_Lw idx_Lww idx_Luw
+         
+% Externally imposed mean streamwise pressure gradient.
+dpdx_imposed = 0;   
+
+%==========================================================================
+% Calculation of RHS at timestep (n-1)
+%==========================================================================
+% This section calculates the right hand side of the iwm system in 
+% eqn (C22) in Yang et al 2015.
+
+% Note that this is named as iwm_lhs because all the terms on the RHS of 
+% eqn (C22) are taken to the LHS, thus the reversed sign for each term 
+% compared to eqn (C22).
+
+% Note that in calculating RHS, all the terms are taken from the previous
+% timestep (n-1).
+
+    % convective terms	
+    conv_x = grad_L(idx_Luu,idx_dirx) + grad_L(idx_Luw,idx_dirz) - ...
+             U_tan_filt(idx_dirx) * ( grad_L(idx_Lu,idx_dirx)  + ...
+                                      grad_L(idx_Lw,idx_dirz) );
+                                  
+    conv_z = grad_L(idx_Luw,idx_dirx) + grad_L(idx_Lww,idx_dirz) - ...
+             U_tan_filt(idx_dirz) * ( grad_L(idx_Lu,idx_dirx)  + ...
+                                      grad_L(idx_Lw,idx_dirz) );			
+
+    % Include the mean pressure gradient if any
+    grad_p_filt(idx_dirx) =  grad_p_filt(idx_dirx) - dpdx_imposed;	
+
+    % RHS term:
+    % This is LHS in discretized ODE: 
+    % y^(n)-y^(n-1)-dt*f(y,t)^(n-1) = y^(n) + LHS = 0, where y = Lx,Lxx etc. 
+    % OR the integrated momentum equation (C22), except for the Lu term
+    iwm_lhs_x = -iwm_L(idx_Lu) + iwm_dt*( conv_x + (1.0/rho)* ...
+                (grad_p_filt(idx_dirx) * hwm - del_tau(idx_dirx)) );	
+    iwm_lhs_z = -iwm_L(idx_Lw) + iwm_dt*( conv_z + (1.0/rho)* ...
+                (grad_p_filt(idx_dirz) * hwm - del_tau(idx_dirz)) ); 
+          
+%==========================================================================
+% temporal filtering at (n)
+%==========================================================================
+    U_tan_filt(idx_dirx) = U_tan_filt(idx_dirx)*(1.0 - iwm_filter) + u * iwm_filter;
+    U_tan_filt(idx_dirz) = U_tan_filt(idx_dirz)*(1.0 - iwm_filter) + v * iwm_filter;
+    p_filt = p_filt*(1.0 - iwm_filter) + p * iwm_filter;
+    
+% Note that all variables after this point are at current timestep (n).
+ 
+%==========================================================================
+% Equilibrium WM solution 
+%(for initialization of utau and reverting back, in case of failure in iWM)
+%========================================================================== 
+
+    % Define some useful flags:
+    deli_flag  = 0;            % activates if hwm^+ <= 11.
+    equil_flag = 0;            % activates when iWM solution fails to converge.
+
+% Note: We initialize utx and utz with standard log-law used in equilibrium flag 
 
     %total velocity
-    Vel = sqrt(iwm_flt_tagvel(iwm_i,iwm_j,iwm_dirx)^2.                  ...
-        +iwm_flt_tagvel(iwm_i,iwm_j,iwm_diry)^2.);
+    Vel = sqrt(U_tan_filt(idx_dirx)^2. + U_tan_filt(idx_dirz)^2.);
     
-    Uproj = iwm_flt_tagvel(iwm_i,iwm_j,iwm_dirx)/Vel;
-    Vproj = iwm_flt_tagvel(iwm_i,iwm_j,iwm_diry)/Vel;
-        
+    Uproj = U_tan_filt(idx_dirx)/Vel;
+    Wproj = U_tan_filt(idx_dirz)/Vel;
+
     equilut = sign(Vel);
     
-    feqm = (equilut/vonk)*log(iwm_Dz(iwm_i,iwm_j)*equilut/nu) + B*equilut - Vel;
+    feqm = (equilut/vonk)*log(hwm*equilut/nu) + B*equilut - Vel;
     
+    % use Newton method to solve the log law.
     iterm=0;
-    while abs(feqm) > tol_eqm && iterm <= 20
-        ut_p = equilut + eps_eqm;
-        feqm_ps = (ut_p/vonk)*log(iwm_Dz(iwm_i,iwm_j)*ut_p/nu) + B*ut_p - Vel;
-        a = (feqm_ps - feqm)/eps_eqm;
+    while abs(feqm) > iwm_tol && iterm <= 20
+        a = (1.0/vonk)*(log(hwm*equilut/nu) + 1.0) + B;        
         equilut = equilut - feqm/a;
         
-        feqm = (equilut/vonk)*log(iwm_Dz(iwm_i,iwm_j)*equilut/nu) + B*equilut - Vel;
+        feqm = (equilut/vonk)*log(hwm*equilut/nu) + B*equilut - Vel;
         iterm = iterm + 1;
     end   
     
     if iterm==21
-        fprintf('ut_eqm did not converge in 20 iterations for i=%i j=%i\n at t=%f5.4',iwm_i,iwm_j,t);
-    end
-
-    deli_flag(iwm_i,iwm_j)=0;
+        fprintf('ut_eqm did not converge in 20 iterations for i=%i j=%i\n',iwm_i,iwm_j);
+    end 
     
-    if abs(iwm_Dz(iwm_i,iwm_j)) <= abs(11*nu/equilut)
-        equilut = sqrt(nu*Vel/iwm_Dz(iwm_i,iwm_j));
-        deli_flag(iwm_i,iwm_j)=1;
+    
+    if abs(hwm) <= abs(11*nu/equilut)
+        equilut = sqrt(nu*Vel/hwm);
+        deli_flag=1;
     end
     
     equilutx = sign(Uproj)*equilut*sqrt(abs(Uproj));
-    equiluty = sign(Vproj)*equilut*sqrt(abs(Vproj));
+    equilutz = sign(Wproj)*equilut*sqrt(abs(Wproj));
+
+%==========================================================================
+% Integral WM solution
+%==========================================================================    
     
-    %Seed values of utx & uty for interal WM calculation
-    iwm_utx(iwm_i,iwm_j) = equilutx;
-    iwm_uty(iwm_i,iwm_j) = equiluty;
+    %Seed values of utx & utz
+    utau_x = equilutx;
+    utau_z = equilutz;
     
-    [fx,fy] = iwm_slv(iwm_lhs(iwm_i,iwm_j,iwm_dirx), iwm_lhs(iwm_i,iwm_j,iwm_diry),   ...
-        iwm_flt_tagvel(iwm_i,iwm_j,iwm_dirx),iwm_flt_tagvel(iwm_i,iwm_j,iwm_diry),    ...
-        iwm_Dz(iwm_i,iwm_j), iwm_utx(iwm_i,iwm_j), iwm_uty(iwm_i,iwm_j), nu, vonk);
-    
-    iter = 0;
-    equil_flag(iwm_i,iwm_j) = 0;
-    div_flag(iwm_i,iwm_j) = 0;
-    neg_flag(iwm_i,iwm_j) = 0;
-    neg_flag_uty(iwm_i,iwm_j) = 0;
-    neg_flag_V(iwm_i,iwm_j)   = 0;
-    maxiter_flag(iwm_i,iwm_j) = 0;
-    A_flag(iwm_i,iwm_j) = 0;
-
-    
-    if deli_flag(iwm_i,iwm_j)==0
-    % use Newton method to solve the system
-    while max(abs(fx),abs(fy)) > iwm_tol
-
-        iwmutxP = iwm_utx(iwm_i,iwm_j)+iwm_eps;
-        iwmutyP = iwm_uty(iwm_i,iwm_j);
-
-        [fxp, fyp] = iwm_slv(iwm_lhs(iwm_i,iwm_j,iwm_dirx),iwm_lhs(iwm_i,iwm_j,iwm_diry), ...
-            iwm_flt_tagvel(iwm_i,iwm_j,iwm_dirx),iwm_flt_tagvel(iwm_i,iwm_j,iwm_diry),...
-            iwm_Dz(iwm_i,iwm_j), iwmutxP, iwmutyP, nu, vonk);
-
-        a11 = (fxp-fx)/iwm_eps;
-        a21 = (fyp-fy)/iwm_eps;
-
-        iwmutxP = iwm_utx(iwm_i,iwm_j);
-        iwmutyP = iwm_uty(iwm_i,iwm_j)+iwm_eps;
-
-        [fxp, fyp] = iwm_slv(iwm_lhs(iwm_i,iwm_j,iwm_dirx),iwm_lhs(iwm_i,iwm_j,iwm_diry), ...
-            iwm_flt_tagvel(iwm_i,iwm_j,iwm_dirx),iwm_flt_tagvel(iwm_i,iwm_j,iwm_diry),    ...
-            iwm_Dz(iwm_i,iwm_j), iwmutxP, iwmutyP, nu, vonk);
-
-        a12 = (fxp-fx)/iwm_eps;
-        a22 = (fyp-fy)/iwm_eps;
+    % iwm_slv evaluates eqns (C23) and (C24) for the given values of utx, 
+    % utz and RHS (iwm_lhs). The values of fx and fz should be close to
+    % zero (i.e. < iwm_tol) for the converged values of utx and utz.
         
-        iwm_utx(iwm_i,iwm_j) = iwm_utx(iwm_i,iwm_j) - 0.50*( a22*fx-a12*fy)/(a11*a22-a12*a21);
-        iwm_uty(iwm_i,iwm_j) = iwm_uty(iwm_i,iwm_j) - 0.50*(-a21*fx+a11*fy)/(a11*a22-a12*a21);
+    [fx,fz] = iwm_slv(iwm_lhs_x,iwm_lhs_z,U_tan_filt(idx_dirx), ...
+                      U_tan_filt(idx_dirz),hwm, utau_x, utau_z, nu, vonk);   
+
+    iter = 0;   
+    
+    if deli_flag==0
         
-        % infinity check
-        if (abs(iwm_utx(iwm_i,iwm_j)) > 10^4.0 || abs(iwm_uty(iwm_i,iwm_j))> 10^4.0)
-            fprintf('divergence in utx/uty at i=%i j=%i\n',iwm_i,iwm_j);            
-            equil_flag(iwm_i,iwm_j) = 1;
-            div_flag(iwm_i,iwm_j)   = 1;
-            break
+        % use Newton method to solve the system
+        while max(abs(fx),abs(fz)) > iwm_tol
+            
+            iwmutxP = utau_x+iwm_eps;
+            iwmutzP = utau_z;
+            
+            [fxp, fzp] = iwm_slv(iwm_lhs_x,iwm_lhs_z,U_tan_filt(idx_dirx),...
+                         U_tan_filt(idx_dirz), hwm, iwmutxP, iwmutzP, nu, vonk);
+            
+            a11 = (fxp-fx)/iwm_eps;
+            a21 = (fzp-fz)/iwm_eps;
+            
+            iwmutxP = utau_x;
+            iwmutzP = utau_z+iwm_eps;
+            
+            [fxp, fzp] = iwm_slv(iwm_lhs_x,iwm_lhs_z,U_tan_filt(idx_dirx),...
+                         U_tan_filt(idx_dirz), hwm, iwmutxP, iwmutzP, nu, vonk);
+            
+            a12 = (fxp-fx)/iwm_eps;
+            a22 = (fzp-fz)/iwm_eps;
+            
+            utau_x = utau_x - 0.50*( a22*fx-a12*fz)/(a11*a22-a12*a21);
+            utau_z = utau_z - 0.50*(-a21*fx+a11*fz)/(a11*a22-a12*a21);
+            
+            % infinity check
+            if (abs(utau_x) > 10^4.0 || abs(utau_z)> 10^4.0)
+                fprintf('divergence in utx or utz at i=%i j=%i , reverting to Equilibrium WM \n',iwm_i,iwm_j);
+                equil_flag = 1;
+                break
+            end
+            
+            [fx, fz] = iwm_slv(iwm_lhs_x, iwm_lhs_z,U_tan_filt(idx_dirx), ...
+                            U_tan_filt(idx_dirz),hwm, utau_x, utau_z, nu, vonk);
+            
+            iter = iter+1;
+            
+            % maximum iteration reached
+            if (iter>MaxIter)
+                equil_flag = 1;
+                break
+            end
         end
-        
-        if iwm_utx(iwm_i,iwm_j) < 0
-%             fprintf('utx has a negative value at i=%i j=%i\n',iwm_i,iwm_j);
-            neg_flag(iwm_i,iwm_j)   = 1;
-        end
-        
-        if iwm_uty(iwm_i,iwm_j) < 0
-            neg_flag_uty(iwm_i,iwm_j)   = 1;
-        end 
-        
-        if iwm_flt_tagvel(iwm_i,iwm_j,iwm_diry) < 0
-            neg_flag_V(iwm_i,iwm_j)   = 1;
-        end
-        
-        [fx, fy] = iwm_slv(iwm_lhs(iwm_i,iwm_j,iwm_dirx), iwm_lhs(iwm_i,iwm_j,iwm_diry),   ...
-            iwm_flt_tagvel(iwm_i,iwm_j,iwm_dirx), iwm_flt_tagvel(iwm_i,iwm_j,iwm_diry),    ...
-            iwm_Dz(iwm_i,iwm_j), iwm_utx(iwm_i,iwm_j), iwm_uty(iwm_i,iwm_j), nu, vonk);
+    end
+
+%==========================================================================
+% Switch to Equilibrium WM if eqm_flag is 1
+%==========================================================================  
  
-        iter = iter+1;
+    if (equil_flag==1 || deli_flag==1)
+        utau_x = equilutx;
+        utau_z = equilutz;
+    end
 
-        % maximum iteration reached
-        if (iter>MaxIter)
-            equil_flag(iwm_i,iwm_j) = 1;
-            maxiter_flag(iwm_i,iwm_j) = 1;
-            break
-        end
-    end
-    end
+%==========================================================================
+% Evaluate all other quantities (based on the converged values of utx & utz)
+%==========================================================================    
     
-    %SWITCH TO EQUILIBRIUM MODEL 
-    if (equil_flag(iwm_i,iwm_j)==1 || deli_flag(iwm_i,iwm_j)==1)
-        iwm_utx(iwm_i,iwm_j) = equilutx;
-        iwm_uty(iwm_i,iwm_j) = equiluty;
-    end
-    
-    %%%% At this point utx and uty have been calculated. After this step, we simply
-    %calculate other parameters using their relations with utx, uty and utau
+    % At this point utx and utz have been calculated. After this step, we simply
+    % calculate other parameters using their relations with utx, utz and utau
     
     % calculate the friciton velocity
-    utau = (iwm_utx(iwm_i,iwm_j)^4.+iwm_uty(iwm_i,iwm_j)^4. )^0.25;
+    utau = (utau_x^4.+utau_z^4.)^0.25;
         
     % eq. C25 in Yang et al. 2015
-    deli = min( 11*nu/utau , iwm_Dz(iwm_i,iwm_j) );    
-    rat = (deli/iwm_Dz(iwm_i,iwm_j));
+    deli = min( 11*nu/utau , hwm ); 
     
-    %calculate Ax, Ay, Cx, Cy
-    if(equil_flag(iwm_i,iwm_j)==1  || deli_flag(iwm_i,iwm_j)==1)
+    % It is convenient to define this ratio to avoid clutter in eqns below.
+    rat = deli/hwm;
+    
+    %calculate Ax, Az, Cx, Cz
+    if(equil_flag==1  || deli_flag==1)
+        
         %By definition of single profile characterized by utau for eqm flag
         delv = nu/utau;
+        
         Ax = 0.;
-        Ay = 0.;
+        Az = 0.;
         Cx = 0.;
-        Cy = 0.;
+        Cz = 0.;
     else
-        % eq. C26 in Yang et al. 2015 with Hayat & Park 2021 modification
-
+        % Reduced form of eqn. (C26) in Yang et al. 2015 when modification 
+        % proposed in Hayat & Park 2021 is applied to the viscous profile 
+        % (see eqns (2.30) and (A5) in Hayat & Park 2021)
         delv = nu/utau;
         
         if deli == 11*nu/utau
             % eq. C27 in Yang et al. 2015 with Hayat & Park 2021 modification
-            Ax = (iwm_flt_tagvel(iwm_i,iwm_j,iwm_dirx)/utau + Uproj/vonk*log(rat) - (deli/delv)*sign(iwm_utx(iwm_i,iwm_j))*(iwm_utx(iwm_i,iwm_j)/utau)^2.0 ) / ((1.0-rat));
-            Ay = (iwm_flt_tagvel(iwm_i,iwm_j,iwm_diry)/utau + Vproj/vonk*log(rat) - (deli/delv)*sign(iwm_uty(iwm_i,iwm_j))*(iwm_uty(iwm_i,iwm_j)/utau)^2.0 ) / ((1.0-rat));
-            Cx = iwm_flt_tagvel(iwm_i,iwm_j,iwm_dirx)/utau - Ax;
-            Cy = iwm_flt_tagvel(iwm_i,iwm_j,iwm_diry)/utau - Ay;
+            Ax = (U_tan_filt(idx_dirx)/utau + Uproj/vonk*log(rat) - ...
+                (deli/delv)*sign(utau_x)*(utau_x/utau)^2.0 ) / ((1.0-rat));
+            Az = (U_tan_filt(idx_dirz)/utau + Wproj/vonk*log(rat) - ...
+                (deli/delv)*sign(utau_z)*(utau_z/utau)^2.0 ) / ((1.0-rat));
+            Cx = U_tan_filt(idx_dirx)/utau - Ax;
+            Cz = U_tan_filt(idx_dirz)/utau - Az;
             
-        elseif deli == iwm_Dz(iwm_i,iwm_j)
+        elseif deli == hwm
             Ax = 0.;
-            Ay = 0.;
+            Az = 0.;
             Cx = 0.;
-            Cy = 0.;
+            Cz = 0.;
             
         end
     end
 
     % check for excessive linear term correction
     % Revert to EQWM if values exceed 2.0
-    if (abs(Ax)>2|| abs(Ay)>2)
-        equil_flag(iwm_i,iwm_j) = 1;
-        A_flag(iwm_i,iwm_j) = 1;
-        iwm_utx(iwm_i,iwm_j) = equilutx;
-        iwm_uty(iwm_i,iwm_j) = equiluty;
-        Ax = 0.;
-        Ay = 0.;
-        Cx = 0.;
-        Cy = 0.;
+    if (abs(Ax)>2|| abs(Az)>2)
+        equil_flag = 1;
         
-        utau = (iwm_utx(iwm_i,iwm_j)^4.+iwm_uty(iwm_i,iwm_j)^4. )^0.25;
+        utau_x = equilutx;
+        utau_z = equilutz;
+        Ax = 0.;
+        Az = 0.;
+        Cx = 0.;
+        Cz = 0.;
+        
+        utau = (utau_x^4.+utau_z^4. )^0.25;
         deli = 11*nu/utau;
         
-        if deli_flag(iwm_i,iwm_j)==1
-        deli = iwm_Dz(iwm_i,iwm_j);    
+        if deli_flag==1
+            deli = hwm;
         end
         
         delv = nu/utau;
-        rat = (deli/iwm_Dz(iwm_i,iwm_j));        
+        rat  = deli/hwm;        
     end
+   
+    % compute the required integrals   
     
-    % store the linear correction
-    iwm_Ax(iwm_i,iwm_j) = Ax;
-    iwm_Ay(iwm_i,iwm_j) = Ay;
-    iwm_Cx(iwm_i,iwm_j) = Cx;
-    iwm_Cy(iwm_i,iwm_j) = Cy;
-    
-    % update integral for last time step
-    iwm_inte_m(iwm_i,iwm_j,iwm_Lu ) = iwm_inte(iwm_i,iwm_j,iwm_Lu );
-    iwm_inte_m(iwm_i,iwm_j,iwm_Lv ) = iwm_inte(iwm_i,iwm_j,iwm_Lv );
-    iwm_inte_m(iwm_i,iwm_j,iwm_Luv) = iwm_inte(iwm_i,iwm_j,iwm_Luv);
-    iwm_inte_m(iwm_i,iwm_j,iwm_Luu) = iwm_inte(iwm_i,iwm_j,iwm_Luu);
-    iwm_inte_m(iwm_i,iwm_j,iwm_Lvv) = iwm_inte(iwm_i,iwm_j,iwm_Lvv);
-
-    % calculate the required integrals
-
-    Dz = iwm_Dz(iwm_i,iwm_j);     %To make following equations more legible
-    utau_x = iwm_utx(iwm_i,iwm_j);
-    utau_y = iwm_uty(iwm_i,iwm_j);
-    
-    if (equil_flag(iwm_i,iwm_j)==1 || deli_flag(iwm_i,iwm_j)==1)
-        if deli_flag(iwm_i,iwm_j)==0
+    if (equil_flag==1 || deli_flag==1)
+        
+        % Equilibrium solution:
+        
+        if deli_flag==0
             % Lu
-            iwm_inte(iwm_i,iwm_j,iwm_Lu) = utau*Uproj*(0.5*(deli^2.0)/delv + ...
-                Dz*( B*(1-rat) - 1.0/vonk*(1-rat+rat*log(deli/delv)-log(Dz/delv)) ));
-            % Lv
-            iwm_inte(iwm_i,iwm_j,iwm_Lv) = utau*Vproj*(0.5*(deli^2.0)/delv + ...
-                Dz*( B*(1-rat) - 1.0/vonk*(1-rat+rat*log(deli/delv)-log(Dz/delv)) ));
+            iwm_L(idx_Lu) = utau*Uproj*(0.5*(deli^2.0)/delv + ...
+                hwm*( B*(1-rat) - 1.0/vonk*(1-rat+rat*log(deli/delv)-log(hwm/delv)) ));
+            % Lw
+            iwm_L(idx_Lw) = utau*Wproj*(0.5*(deli^2.0)/delv + ...
+                hwm*( B*(1-rat) - 1.0/vonk*(1-rat+rat*log(deli/delv)-log(hwm/delv)) ));
             % Luu
-            iwm_inte(iwm_i,iwm_j,iwm_Luu) = (utau*Uproj)^2 * (1.0/3.0*(deli^3.0/delv^2.0)+...
-                Dz*((1.0/vonk)^2*((log(Dz/delv) - 1)^2.0 -rat*(log(deli/delv) - 1)^2.0 + 1-rat) ...
-                +(2*B/vonk)*((log(Dz/delv) - 1) -rat*(log(deli/delv) - 1)) + B^2.0*(1-rat)));
-            % Lvv
-            iwm_inte(iwm_i,iwm_j,iwm_Lvv) = (utau*Vproj)^2 * (1.0/3.0*(deli^3.0/delv^2.0)+...
-                Dz*((1.0/vonk)^2*((log(Dz/delv) - 1)^2.0 -rat*(log(deli/delv) - 1)^2.0 + 1-rat) ...
-                +(2*B/vonk)*((log(Dz/delv) - 1) -rat*(log(deli/delv) - 1)) + B^2.0*(1-rat)));
-            % Luv
-            iwm_inte(iwm_i,iwm_j,iwm_Luv) = (utau^2)*Uproj*Vproj*(1.0/3.0*(deli^3.0/delv^2.0)+...
-                Dz*((1.0/vonk^2)*((log(Dz/delv) - 1)^2.0 -rat*(log(deli/delv) - 1)^2.0 + 1-rat) ...
-                +(2*B/vonk)*((log(Dz/delv) - 1) -rat*(log(deli/delv) - 1)) + B^2.0*(1-rat)));
+            iwm_L(idx_Luu) = (utau*Uproj)^2 * (1.0/3.0*(deli^3.0/delv^2.0)+...
+                hwm*((1.0/vonk)^2*((log(hwm/delv) - 1)^2.0 -rat*(log(deli/delv) - 1)^2.0 + 1-rat) ...
+                +(2*B/vonk)*((log(hwm/delv) - 1) -rat*(log(deli/delv) - 1)) + B^2.0*(1-rat)));
+            % Lww
+            iwm_L(idx_Lww) = (utau*Wproj)^2 * (1.0/3.0*(deli^3.0/delv^2.0)+...
+                hwm*((1.0/vonk)^2*((log(hwm/delv) - 1)^2.0 -rat*(log(deli/delv) - 1)^2.0 + 1-rat) ...
+                +(2*B/vonk)*((log(hwm/delv) - 1) -rat*(log(deli/delv) - 1)) + B^2.0*(1-rat)));
+            % Luw
+            iwm_L(idx_Luw) = (utau^2)*Uproj*Wproj*(1.0/3.0*(deli^3.0/delv^2.0)+...
+                hwm*((1.0/vonk^2)*((log(hwm/delv) - 1)^2.0 -rat*(log(deli/delv) - 1)^2.0 + 1-rat) ...
+                +(2*B/vonk)*((log(hwm/delv) - 1) -rat*(log(deli/delv) - 1)) + B^2.0*(1-rat)));
         else
             % Lu:  Eq. C19 in Yang et al. 2015 with Hayat & Park 2021 modification
-            iwm_inte(iwm_i,iwm_j,iwm_Lu) = 0.5*sign(utau_x)*((utau_x^2.0)/utau)*(deli^2.0)/delv;
-            % Lv
-            iwm_inte(iwm_i,iwm_j,iwm_Lv) = 0.5*sign(utau_y)*((utau_y^2.0)/utau)*(deli^2.0)/delv;
+            iwm_L(idx_Lu) = 0.5*sign(utau_x)*((utau_x^2.0)/utau)*(deli^2.0)/delv;
+            % Lw
+            iwm_L(idx_Lw) = 0.5*sign(utau_z)*((utau_z^2.0)/utau)*(deli^2.0)/delv;
             
             % Luu: Eq. C20 in Yang et al 2015 with Hayat & Park 2021 modification
-            iwm_inte(iwm_i,iwm_j,iwm_Luu) = 1.0/3.0*(utau_x^4.0/utau^2.0)*(deli^3.0/delv^2.0);
-            % Lvv
-            iwm_inte(iwm_i,iwm_j,iwm_Lvv) = 1.0/3.0*(utau_y^4.0/utau^2.0)*(deli^3.0/delv^2.0);
+            iwm_L(idx_Luu) = 1.0/3.0*(utau_x^4.0/utau^2.0)*(deli^3.0/delv^2.0);
+            % Lww
+            iwm_L(idx_Lww) = 1.0/3.0*(utau_z^4.0/utau^2.0)*(deli^3.0/delv^2.0);
             
-            % Luv: Eq. C21 in Yang et al 2015 with Hayat & Park 2021 modification
-            iwm_inte(iwm_i,iwm_j,iwm_Luv) = 1.0/3.0*sign(utau_x)*sign(utau_y)*(utau_x*utau_y/utau)^2.0*(deli^3.0/delv^2.0);
+            % Luw: Eq. C21 in Yang et al 2015 with Hayat & Park 2021 modification
+            iwm_L(idx_Luw) = 1.0/3.0*sign(utau_x)*sign(utau_z)*(utau_x*utau_z/utau)^2.0*(deli^3.0/delv^2.0);
         end
-        
+
     else
+        % Integral WM solution:
         
         if deli == 11*nu/utau
             
             % Lu:  Eq. C19 in Yang et al. 2015 with Hayat & Park 2021 modification
-            iwm_inte(iwm_i,iwm_j,iwm_Lu) = 0.5*sign(utau_x)*((utau_x^2.0)/utau)*(deli^2.0)/delv + ...
-                utau*Dz*(0.5*Ax*(1-rat^2.0) + Cx*(1-rat) - Uproj/vonk*(1-rat+rat*log(rat)));
-            % Lv
-            iwm_inte(iwm_i,iwm_j,iwm_Lv) = 0.5*sign(utau_y)*((utau_y^2.0)/utau)*(deli^2.0)/delv + ...
-                utau*Dz*(0.5*Ay*(1-rat^2.0) + Cy*(1-rat) - Vproj/vonk*(1-rat+rat*log(rat)));
+            iwm_L(idx_Lu) = 0.5*sign(utau_x)*((utau_x^2.0)/utau)*(deli^2.0)/delv + ...
+                utau*hwm*(0.5*Ax*(1-rat^2.0) + Cx*(1-rat) - Uproj/vonk*(1-rat+rat*log(rat)));
+            % Lw
+            iwm_L(idx_Lw) = 0.5*sign(utau_z)*((utau_z^2.0)/utau)*(deli^2.0)/delv + ...
+                utau*hwm*(0.5*Az*(1-rat^2.0) + Cz*(1-rat) - Wproj/vonk*(1-rat+rat*log(rat)));
             
             % Luu: Eq. C20 in Yang et al 2015 with Hayat & Park 2021 modification
-            iwm_inte(iwm_i,iwm_j,iwm_Luu) = 1.0/3.0*(utau_x^4.0/utau^2.0)*(deli^3.0/delv^2.0)+...
-                utau^2.0*Dz*(-Ax*(Uproj/vonk)*rat^2.0*log(rat) + Ax*(Cx-Uproj/vonk/2.0) ...
+            iwm_L(idx_Luu) = 1.0/3.0*(utau_x^4.0/utau^2.0)*(deli^3.0/delv^2.0)+...
+                utau^2.0*hwm*(-Ax*(Uproj/vonk)*rat^2.0*log(rat) + Ax*(Cx-Uproj/vonk/2.0) ...
                 *(1-rat^2.0) + Ax^2.0/3.0*(1-rat^3.0) + (Cx - Uproj/vonk)^2.0   ...
                 -rat*(Cx-Uproj/vonk+Uproj/vonk*log(rat))^2.0 + (Uproj/vonk)^2.0*(1-rat));
-            % Lvv
-            iwm_inte(iwm_i,iwm_j,iwm_Lvv) = 1.0/3.0*(utau_y^4.0/utau^2.0)*(deli^3.0/delv^2.0)+...
-                utau^2.0*Dz*(-Ay*(Vproj/vonk)*rat^2.0*log(rat) + Ay*(Cy-Vproj/vonk/2.0) ...
-                *(1-rat^2.0) + Ay^2.0/3.0*(1-rat^3.0) + (Cy - Vproj/vonk)^2.0   ...
-                -rat*(Cy-Vproj/vonk+Vproj/vonk*log(rat))^2.0 + (Vproj/vonk)^2.0*(1-rat));
+            % Lww
+            iwm_L(idx_Lww) = 1.0/3.0*(utau_z^4.0/utau^2.0)*(deli^3.0/delv^2.0)+...
+                utau^2.0*hwm*(-Az*(Wproj/vonk)*rat^2.0*log(rat) + Az*(Cz-Wproj/vonk/2.0) ...
+                *(1-rat^2.0) + Az^2.0/3.0*(1-rat^3.0) + (Cz - Wproj/vonk)^2.0   ...
+                -rat*(Cz-Wproj/vonk+Wproj/vonk*log(rat))^2.0 + (Wproj/vonk)^2.0*(1-rat));
             
-            % Luv: Eq. C21 in Yang et al 2015 with Hayat & Park 2021 modification
-            iwm_inte(iwm_i,iwm_j,iwm_Luv) = 1.0/3.0*sign(utau_x)*sign(utau_y)*(utau_x*utau_y/utau)^2.0*(deli^3.0/delv^2.0)+...
-                utau^2.0*Dz*(-1.0/vonk*(Ax*Vproj+Ay*Uproj)*(0.25-0.25*rat^2.0+0.5*rat^2.0*log(rat))...       %CHECK last rat^2
-                -1/vonk*(Cx*Vproj+Cy*Uproj)*(1-rat+rat*log(rat))-Uproj*Vproj/(vonk^2.0)*(rat-2+rat*(log(rat)-1)^2.0)...
-                +(1.0/3.0)*Ax*Ay*(1-rat^3.0)+0.5*(Ax*Cy+Ay*Cx)*(1-rat^2.0)+Cx*Cy*(1-rat));
+            % Luw: Eq. C21 in Yang et al 2015 with Hayat & Park 2021 modification
+            iwm_L(idx_Luw) = 1.0/3.0*sign(utau_x)*sign(utau_z)*(utau_x*utau_z/utau)^2.0*(deli^3.0/delv^2.0)+...
+                utau^2.0*hwm*(-1.0/vonk*(Ax*Wproj+Az*Uproj)*(0.25-0.25*rat^2.0+0.5*rat^2.0*log(rat))...
+                -1/vonk*(Cx*Wproj+Cz*Uproj)*(1-rat+rat*log(rat))-Uproj*Wproj/(vonk^2.0)*(rat-2+rat*(log(rat)-1)^2.0)...
+                +(1.0/3.0)*Ax*Az*(1-rat^3.0)+0.5*(Ax*Cz+Az*Cx)*(1-rat^2.0)+Cx*Cz*(1-rat));
             
-        elseif deli == Dz
+        elseif deli == hwm
             
             % Lu:  
-            iwm_inte(iwm_i,iwm_j,iwm_Lu) = 0.5*sign(utau_x)*((utau_x^2.0)/utau)*(deli^2.0)/delv;
-            % Lv
-            iwm_inte(iwm_i,iwm_j,iwm_Lv) = 0.5*sign(utau_y)*((utau_y^2.0)/utau)*(deli^2.0)/delv;
-            
+            iwm_L(idx_Lu) = 0.5*sign(utau_x)*((utau_x^2.0)/utau)*(deli^2.0)/delv;
+            % Lw
+            iwm_L(idx_Lw) = 0.5*sign(utau_z)*((utau_z^2.0)/utau)*(deli^2.0)/delv;            
             % Luu:
-            iwm_inte(iwm_i,iwm_j,iwm_Luu) = 1.0/3.0*(utau_x^4.0/utau^2.0)*(deli^3.0/delv^2.0);
-            % Lvv
-            iwm_inte(iwm_i,iwm_j,iwm_Lvv) = 1.0/3.0*(utau_y^4.0/utau^2.0)*(deli^3.0/delv^2.0);
-            
-            % Luv: 
-            iwm_inte(iwm_i,iwm_j,iwm_Luv) = 1.0/3.0*sign(utau_x)*sign(utau_y)*(utau_x*utau_y/utau)^2.0*(deli^3.0/delv^2.0);
+            iwm_L(idx_Luu) = 1.0/3.0*(utau_x^4.0/utau^2.0)*(deli^3.0/delv^2.0);
+            % Lww
+            iwm_L(idx_Lww) = 1.0/3.0*(utau_z^4.0/utau^2.0)*(deli^3.0/delv^2.0);            
+            % Luw: 
+            iwm_L(idx_Luw) = 1.0/3.0*sign(utau_x)*sign(utau_z)*(utau_x*utau_z/utau)^2.0*(deli^3.0/delv^2.0);
         end
     end
 
-    if  deli_flag(iwm_i,iwm_j)==1
+    if  deli_flag==1
         
         % calculate top derivatives
-        iwm_dudzT(iwm_i,iwm_j,iwm_dirx) = iwm_flt_tagvel(iwm_i,iwm_j,iwm_dirx)/Dz;
-        iwm_dudzT(iwm_i,iwm_j,iwm_diry) = iwm_flt_tagvel(iwm_i,iwm_j,iwm_diry)/Dz;
+        dudyT_x = U_tan_filt(idx_dirx)/hwm;
+        dudyT_z = U_tan_filt(idx_dirz)/hwm;
         
         % calculte the turbulent diffusion term
-        dVelzT = Uproj*iwm_flt_tagvel(iwm_i,iwm_j,iwm_dirx)/Dz + Vproj*iwm_flt_tagvel(iwm_i,iwm_j,iwm_diry)/Dz;        
+        dVeldyT = Uproj*U_tan_filt(idx_dirx)/hwm + Wproj*U_tan_filt(idx_dirz)/hwm;        
 
     else
         
         % calculate top derivatives
-        % From Eq. C12
-        iwm_dudzT(iwm_i,iwm_j,iwm_dirx) = (Uproj/vonk+Ax)*utau/Dz;
-        iwm_dudzT(iwm_i,iwm_j,iwm_diry) = (Vproj/vonk+Ay)*utau/Dz;
+        % From Eq. C12 Yang et al. 2015
+        dudyT_x = (Uproj/vonk+Ax)*utau/hwm;
+        dudyT_z = (Wproj/vonk+Az)*utau/hwm;
         
         % calculte the turbulent diffusion term
-        % Eq. C14
-        %Note: this reduces to utau/(vonk*Dz) for eqm flag
-        dVelzT = (Uproj*(Uproj/vonk+Ax) + Vproj*(Vproj/vonk+Ay))*utau/Dz;        
+        % Eq. C14 Yang et al. 2015
+        % Note: this reduces to utau/(vonk*Dz) for eqm flag
+        dVeldyT = (Uproj*(Uproj/vonk+Ax) + Wproj*(Wproj/vonk+Az))*utau/hwm;        
     end
                
-    % Eq. C13, the eddy viscosity 'nut' at y=hwm is:
-    nut_hwm = (vonk*Dz)^2.0*dVelzT;
+    % Eq. C13 Yang et al. 2015, the eddy viscosity 'nut' at y=hwm is:
+    nut_hwm = (vonk*hwm)^2.0*dVeldyT;
     
     % calculate the wall stress
     %Note: Unlike prescribed roughness case, here we have the same form for
     %tauwx for both equilibrium and non-equilibrium
     
-    iwm_tauwx(iwm_i,iwm_j) = sign(iwm_utx(iwm_i,iwm_j))*iwm_utx(iwm_i,iwm_j)^2.0;
-    iwm_tauwy(iwm_i,iwm_j) = sign(iwm_uty(iwm_i,iwm_j))*iwm_uty(iwm_i,iwm_j)^2.0;
+    tauw_x = sign(utau_x)*rho*utau_x^2.0;
+    tauw_z = sign(utau_z)*rho*utau_z^2.0;
     
     % shear stress difference between top and bottom
-    iwm_diff(iwm_i,iwm_j,iwm_dirx) = (nut_hwm+nu)*iwm_dudzT(iwm_i,iwm_j,...
-        iwm_dirx) - iwm_tauwx(iwm_i,iwm_j);
-    
-    iwm_diff(iwm_i,iwm_j,iwm_diry) = (nut_hwm+nu)*iwm_dudzT(iwm_i,iwm_j,...
-        iwm_diry) - iwm_tauwy(iwm_i,iwm_j);
+    del_tau(idx_dirx) = (nut_hwm+nu)*dudyT_x - tauw_x;   
+    del_tau(idx_dirz) = (nut_hwm+nu)*dudyT_z - tauw_z;
     
     % TIMESCALE: the filtered friction velocity used for filtering time scale
-    iwm_flt_us(iwm_i,iwm_i) = iwm_tR(iwm_i,iwm_j)*utau + (1.-iwm_tR(iwm_i,iwm_j))*iwm_flt_us(iwm_i,iwm_j);
+    utau_filt = iwm_filter*utau + (1.0-iwm_filter)*utau_filt;
     
-    % update the filtering time scale E
-    % Eq. 26
-    
-    iwm_tR(iwm_i,iwm_j) = iwm_dt/(theta*Dz/iwm_flt_us(iwm_i,iwm_j)/vonk);
+    % update the filtering time scale (epsilon in Eq. 26 Yang et al. 2015)    
+    iwm_filter = iwm_dt/(theta*hwm/utau_filt/vonk);
     
     % filtering time scale can only be larger than the time step,
     % if not, then just use the instantaneous flow field to do the model
-    if (iwm_tR(iwm_i,iwm_j) > 1.)
-        iwm_tR(iwm_i,iwm_j) = 1.;
+    if (iwm_filter > 1.)
+        iwm_filter = 1.;
     end
-end
-end
 
 end
 %*******************************************************************************
-%% subroutine iwm_slv(lhsx,lhsy,iwm_flt_tagvel(iwm_i,iwm_j,iwm_dirx),Uy,Dz,deli,utx,uty,fx,fy)
+%% Subroutine: iwm_slv
 %*******************************************************************************
-
-function [fx,fy]= iwm_slv(lhsx,lhsy,Ux,Uy,Dz,utx,uty,nu,vonk)
+% iwm_slv evaluates eqns (C23) and (C24) in Yang et al. 2015 for the given 
+% values of utx, utz and RHS (iwm_lhs). The values of fx and fz should be 
+% close to zero (i.e. < iwm_tol) for the converged values of utx and utz.
+    
+function [fx,fz]= iwm_slv(lhsx,lhsz,Ux,Uz,hwm,utx,utz,nu,vonk)
 
 %U_tot
-Vel = sqrt(Ux^2.0+Uy^2.0);
+Vel = sqrt(Ux^2.0+Uz^2.0);
 
 %Eqn C30
-utau = (utx^4.0 + uty^4.0)^(0.25);
+utau = (utx^4.0 + utz^4.0)^(0.25);
 
 %Eqn C26 (viscous scale)
 delv = nu/utau;
 
 %Eqn C25 
 %(Interface of log and viscous layer chosen as min of y+=11 or h_wm)
-deli = min(11*nu/utau,Dz);
+deli = min(11*nu/utau,hwm);
 % deli = 11*nu/utau;             % 11*delv; 
 
 %Find parameters of log profile only if deli=11*nu/utau, otherwise linear
 %profile in whole inner layer
 if deli == 11*nu/utau
     %Eqn C27
-    Ax = (Ux/utau + (Ux/Vel)/vonk*log(deli/Dz) - (deli/delv)*sign(utx)*(utx/utau)^2.0) / ((1.0-deli/Dz));
-    Ay = (Uy/utau + (Uy/Vel)/vonk*log(deli/Dz) - (deli/delv)*sign(uty)*(uty/utau)^2.0) / ((1.0-deli/Dz));
+    Ax = (Ux/utau + (Ux/Vel)/vonk*log(deli/hwm) - (deli/delv)*sign(utx)* ...
+         (utx/utau)^2.0) / ((1.0-deli/hwm));
+    Az = (Uz/utau + (Uz/Vel)/vonk*log(deli/hwm) - (deli/delv)*sign(utz)* ...
+         (utz/utau)^2.0) / ((1.0-deli/hwm));
     
     %Eqn C28
     Cx = Ux/utau - Ax;
-    Cy = Uy/utau - Ay;
+    Cz = Uz/utau - Az;
+        
+    %define ratio of deli to h_wm
+    rat = (deli/hwm);
     
     %LHS of Eqn C23 and C24
-    %define ratio of deli to h_wm
-    rat = (deli/Dz);
-    inteLu = 0.5*sign(utx)*(utx^2.0/utau)*(deli^2.0)/delv + utau*Dz*( 0.5*Ax*(1-rat^2.0) + Cx*(1-rat) - (Ux/Vel)/vonk*(1-rat+rat*log(rat)) );
-    inteLv = 0.5*sign(uty)*(uty^2.0/utau)*(deli^2.0)/delv + utau*Dz*( 0.5*Ay*(1-rat^2.0) + Cy*(1-rat) - (Uy/Vel)/vonk*(1-rat+rat*log(rat)) );
+    Lu = 0.5*sign(utx)*(utx^2.0/utau)*(deli^2.0)/delv + utau*hwm* ...
+        ( 0.5*Ax*(1-rat^2.0) + Cx*(1-rat) - (Ux/Vel)/vonk*(1-rat+rat*log(rat)) );
+    Lw = 0.5*sign(utz)*(utz^2.0/utau)*(deli^2.0)/delv + utau*hwm* ...
+        ( 0.5*Az*(1-rat^2.0) + Cz*(1-rat) - (Uz/Vel)/vonk*(1-rat+rat*log(rat)) );
     
-elseif deli == Dz
+elseif deli == hwm
     
-    inteLu = 0.5*sign(utx)*(utx^2.0/utau)*(deli^2.0)/delv;
-    inteLv = 0.5*sign(uty)*(uty^2.0/utau)*(deli^2.0)/delv; 
+    Lu = 0.5*sign(utx)*(utx^2.0/utau)*(deli^2.0)/delv;
+    Lw = 0.5*sign(utz)*(utz^2.0/utau)*(deli^2.0)/delv; 
     
 end
 
-fx = inteLu+lhsx;
-fy = inteLv+lhsy; 
+fx = Lu+lhsx;
+fz = Lw+lhsz; 
 
 end
