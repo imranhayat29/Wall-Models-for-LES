@@ -11,4 +11,4 @@ Channel flow DNS data from Johns Hopkins Turbulence Database (JHTDB) and UT-Aust
 
 For details, please check the following ArXiv link to the paper describing these wall models:
 
-https://arxiv.org/abs/2111.02542
+https://doi.org/10.1016/j.jcp.2023.112175
